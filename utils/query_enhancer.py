@@ -8,20 +8,8 @@ class QueryEnhancer:
     """查询增强器，专门用于建筑资产查询的语义增强"""
     
     def __init__(self):
-        # 楼层同义词映射
-        self.floor_synonyms = {
-            "3F": ["3层", "三层", "3F层"],
-            "3层": ["3F", "三层", "3F层"],
-            "三层": ["3F", "3层", "3F层"],
-            "2F": ["2层", "二层", "2F层"],
-            "2层": ["2F", "二层", "2F层"],
-            "二层": ["2F", "2层", "2F层"],
-            "1F": ["1层", "一层", "1F层"],
-            "1层": ["1F", "一层", "1F层"],
-            "一层": ["1F", "1层", "1F层"],
-            "B1": ["B1层", "地下一层", "地下1层"],
-            "地下一层": ["B1", "B1层", "地下1层"],
-        }
+        # 动态楼层同义词映射将在enhance_query方法中生成
+        self.floor_synonyms = {}
         
         # 设备类型同义词
         self.equipment_synonyms = {
@@ -108,6 +96,9 @@ class QueryEnhancer:
             matches = re.findall(pattern, query)
             entities["floors"].extend(matches)
         
+        # 动态生成楼层同义词
+        self._generate_floor_synonyms(entities["floors"])
+        
         # 提取设备类型
         equipment_keywords = ["设备", "空调箱", "配电箱", "变风量", "冷机", "水泵", "配电柜"]
         for keyword in equipment_keywords:
@@ -115,6 +106,38 @@ class QueryEnhancer:
                 entities["equipment_types"].append(keyword)
         
         return entities
+    
+    def _generate_floor_synonyms(self, floors: List[str]) -> None:
+        """动态生成楼层同义词"""
+        self.floor_synonyms = {}
+        
+        for floor in floors:
+            if not floor:
+                continue
+                
+            # 处理数字楼层
+            if re.match(r'\d+[F层]', floor):
+                floor_num = re.search(r'(\d+)', floor).group(1)
+                if 'F' in floor:
+                    self.floor_synonyms[floor] = [f"{floor_num}层", f"{floor_num}F层"]
+                elif '层' in floor:
+                    self.floor_synonyms[floor] = [f"{floor_num}F", f"{floor_num}F层"]
+            
+            # 处理中文数字楼层
+            elif re.match(r'[一二三四五六七八九十]+层', floor):
+                cn_nums = {"一":"1", "二":"2", "三":"3", "四":"4", "五":"5", "六":"6", "七":"7", "八":"8", "九":"9", "十":"10"}
+                for cn, num in cn_nums.items():
+                    if cn in floor:
+                        self.floor_synonyms[floor] = [f"{num}F", f"{num}层", f"{num}F层"]
+                        break
+            
+            # 处理地下楼层
+            elif re.match(r'B\d+', floor):
+                b_num = re.search(r'B(\d+)', floor).group(1)
+                self.floor_synonyms[floor] = [f"B{b_num}层", f"地下{b_num}层", f"地下{b_num}层"]
+            elif '地下' in floor:
+                b_num = re.search(r'地下(\d+)', floor).group(1) if re.search(r'地下(\d+)', floor) else "1"
+                self.floor_synonyms[floor] = [f"B{b_num}", f"B{b_num}层", f"地下{b_num}层"]
     
     def _generate_enhanced_queries(self, original_query: str, entities: Dict[str, List[str]]) -> List[str]:
         """生成增强查询"""
@@ -163,14 +186,15 @@ class QueryEnhancer:
         # 处理各种楼层表示
         if floor_str in ["一层", "1层", "1F"]:
             return 1
-        elif floor_str in ["二层", "2层", "2F"]:
-            return 2
-        elif floor_str in ["三层", "3层", "3F"]:
-            return 3
-        elif floor_str in ["四层", "4层", "4F"]:
-            return 4
-        elif floor_str in ["五层", "5层", "5F"]:
-            return 5
+        # 动态处理中文数字楼层
+        cn_nums = {"一":"1", "二":"2", "三":"3", "四":"4", "五":"5", "六":"6", "七":"7", "八":"8", "九":"9", "十":"10"}
+        for cn, num in cn_nums.items():
+            if cn in floor_str:
+                return int(num)
+        
+        # 处理数字楼层
+        if floor_str.isdigit():
+            return int(floor_str)
         else:
             # 尝试提取数字
             import re

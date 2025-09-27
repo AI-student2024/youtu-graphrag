@@ -50,10 +50,20 @@ def load_graph_from_json(input_path: str) -> nx.MultiDiGraph:
             node_mapping[start_key] = node_id
             node_counter += 1
             
-            # Add node with all properties
+            # Add node with all properties (normalize common keys)
+            def _normalize_props(p: dict) -> dict:
+                if not isinstance(p, dict):
+                    return {"name": str(p)}
+                props_norm = dict(p)
+                # Standardize chunk id key
+                for k in ["chunk_id", "chunkId", "source_chunk", "source_chunk_id", "chunk"]:
+                    if k in props_norm and "chunk id" not in props_norm:
+                        props_norm["chunk id"] = props_norm[k]
+                        break
+                return props_norm
             node_attrs = {
                 "label": start_node_data["label"],
-                "properties": start_node_data["properties"]
+                "properties": _normalize_props(start_node_data["properties"])
             }
             
             # Add level based on label
@@ -83,10 +93,20 @@ def load_graph_from_json(input_path: str) -> nx.MultiDiGraph:
             node_mapping[end_key] = node_id
             node_counter += 1
             
-            # Add node with all properties
+            # Add node with all properties (normalize common keys)
+            def _normalize_props(p: dict) -> dict:
+                if not isinstance(p, dict):
+                    return {"name": str(p)}
+                props_norm = dict(p)
+                # Standardize chunk id key
+                for k in ["chunk_id", "chunkId", "source_chunk", "source_chunk_id", "chunk"]:
+                    if k in props_norm and "chunk id" not in props_norm:
+                        props_norm["chunk id"] = props_norm[k]
+                        break
+                return props_norm
             node_attrs = {
                 "label": end_node_data["label"],
-                "properties": end_node_data["properties"]
+                "properties": _normalize_props(end_node_data["properties"])
             }
             
             # Add level based on label

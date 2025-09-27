@@ -318,6 +318,30 @@ retrieval:
   similarity_threshold: 0.3
   top_k: 20
   top_k_filter: 20
+  # Graph-First策略配置
+  graph_first:
+    # 建筑识别模式
+    building_pattern: "([AB])栋"
+    # 楼层识别模式
+    floor_pattern: "(\\d+)F|(\\d+)层|([一二三四五六七八九十]+)层|地下一层|B1"
+    # LOC模式
+    loc_pattern: "LOC-[AB]-\\d{2}(?:-[A-Z0-9\\-]+)?"
+    # 数字映射
+    number_map:
+      "1": "一"
+      "2": "二"
+      "3": "三"
+      "4": "四"
+      "5": "五"
+      "6": "六"
+      "7": "七"
+      "8": "八"
+      "9": "九"
+      "10": "十"
+    # 设备关键词
+    device_keywords: ["设备", "冷机", "水泵", "配电", "空调", "机组", "柜", "箱", "末端"]
+    # 房间关键词
+    room_keywords: ["机电房", "机房", "配电房", "设备房", "MECH"]
 triggers:
   constructor_trigger: true
   mode: agent

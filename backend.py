@@ -709,7 +709,10 @@ async def ask_question(request: QuestionRequest, client_id: str = "default"):
                 "triples_count": len(triples),
                 "chunks_count": len(chunk_ids),
                 "processing_time": elapsed,
-                "chunk_contents": list(all_chunk_contents.values())[:3]
+                "chunk_contents": list(all_chunk_contents.values())[:3],
+                # 添加累计统计
+                "cumulative_triples_count": len(all_triples),
+                "cumulative_chunks_count": len(all_chunk_contents)
             })
 
         # Step 3: IRCoT iterative refinement
@@ -749,14 +752,12 @@ async def ask_question(request: QuestionRequest, client_id: str = "default"):
 You are an expert knowledge assistant using iterative retrieval with chain-of-thought reasoning.
 
 CRITICAL: When analyzing building equipment information, understand that device names contain location information:
-- "A栋3层空调箱" means an air conditioning unit located on the 3rd floor of Building A
-- "A栋3层01号变风量末端" means a VAV terminal located on the 3rd floor of Building A  
-- "A栋3层照明配电箱" means a lighting distribution box located on the 3rd floor of Building A
+- "X栋Y层设备名" means equipment located on the Y floor of Building X
 - Equipment names like "X栋Y层设备名" directly indicate the building (X栋) and floor (Y层/YF) location
 
-CRITICAL RULE: If the question asks about equipment on a specific floor (like "A栋3F" or "A栋3层"), and you see equipment with matching names in the chunks, these ARE NOT examples - they are ACTUAL REAL EQUIPMENT located on that floor. You MUST list them as the answer.
+CRITICAL RULE: If the question asks about equipment on a specific floor, and you see equipment with matching names in the chunks, these ARE NOT examples - they are ACTUAL REAL EQUIPMENT located on that floor. You MUST list them as the answer.
 
-For example, if you see "#### 设备: A栋3层空调箱 (A-AHU-03)" in the chunks, this is a REAL air conditioning unit on A栋3层, not an example.
+For example, if you see "#### 设备: X栋Y层设备名" in the chunks, this is a REAL equipment on X栋Y层, not an example.
 
 Current Question: {question}
 Current Iteration Query: {current_query}
@@ -780,7 +781,10 @@ Your reasoning:
                 "chunks_count": len(loop_chunk_ids),
                 "processing_time": 0,
                 "chunk_contents": loop_chunk_contents[:3],
-                "thought": reasoning[:300]
+                "thought": reasoning[:300],
+                # 添加累计统计
+                "cumulative_triples_count": len(all_triples),
+                "cumulative_chunks_count": len(all_chunk_contents)
             })
             if "So the answer is:" in reasoning:
                 m = _re.search(r"So the answer is:\s*(.*)", reasoning, flags=_re.IGNORECASE | _re.DOTALL)
@@ -800,23 +804,167 @@ Your reasoning:
                 new_triples = new_ret.get('triples', []) or []
                 new_chunk_ids = new_ret.get('chunk_ids', []) or []
                 new_chunk_contents = new_ret.get('chunk_contents', []) or []
-                
-                # 调试日志：检查新检索结果
-                logger.info(f"迭代检索Step{step} - 新增chunk数量: {len(new_chunk_ids)}")
+
+                # 调试日志：检查新检索结果（过滤前）
+                logger.info(f"迭代检索Step{step} - 新增chunk数量(过滤前): {len(new_chunk_ids)}")
                 logger.info(f"迭代检索Step{step} - 当前all_chunk_contents数量: {len(all_chunk_contents)}")
-                
-                if isinstance(new_chunk_contents, dict):
-                    for cid, ctext in new_chunk_contents.items():
-                        all_chunk_contents[cid] = ctext
-                        logger.info(f"迭代检索Step{step} - 添加chunk: {cid} - {ctext[:100]}...")
-                else:
-                    for i_c, cid in enumerate(new_chunk_ids):
-                        if i_c < len(new_chunk_contents):
-                            all_chunk_contents[cid] = new_chunk_contents[i_c]
-                            logger.info(f"迭代检索Step{step} - 添加chunk: {cid} - {new_chunk_contents[i_c][:100]}...")
-                
+
+                # --- 楼层兜底过滤：根据问题提取目标楼层别名，过滤无关 chunk ---
+                def _extract_floor_aliases(q: str):
+                    try:
+                        import re as __re
+                        building_match = __re.search(r'([A-Za-z])栋', q)
+                        floor_match = __re.search(r'(\d+)(?:层|F|楼)', q)
+                        basement_match = __re.search(r'([A-Za-z]栋)(B\d+)(?:层|F|楼|地下)', q)
+                        aliases = []
+                        
+                        if building_match and (floor_match or basement_match):
+                            b = building_match.group(1).upper()
+                            building = f"{b}栋"
+                            
+                            if basement_match:
+                                # 处理地下楼层（B1层、B2层等）
+                                floor_str = basement_match.group(2)  # B1, B2, etc.
+                                floor_num = int(floor_str[1:])  # 提取数字部分
+                                aliases = [
+                                    f"{building}{floor_str}层",
+                                    f"{building}{floor_str}F", 
+                                    f"{building}{floor_str}楼",
+                                    f"{building}地下{floor_num}层",
+                                    f"{building}地下一层" if floor_num == 1 else f"{building}地下{floor_num}层",
+                                    f"LOC-{b}-{floor_str}",
+                                ]
+                            else:
+                                # 处理普通楼层（1层、2层等）
+                                f = int(floor_match.group(1))
+                                floor_cn = f"{f}层"
+                                aliases = [
+                                    f"{building}{floor_cn}",
+                                    f"{building}{f}F",
+                                    f"{building}{f}楼",
+                                    f"LOC-{b}-{f:02d}",
+                                ]
+                                # 中文数字变体（1~10常用）
+                                cn_nums = {1:"一",2:"二",3:"三",4:"四",5:"五",6:"六",7:"七",8:"八",9:"九",10:"十"}
+                                if f in cn_nums:
+                                    aliases.append(f"{building}{cn_nums[f]}层")
+                            
+                            # 动态添加常见别名补充
+                            if building_match and floor_match:
+                                building_letter = building_match.group(1)
+                                floor_num = int(floor_match.group(1))
+                                # 添加中文数字变体
+                                cn_nums = {1:"一",2:"二",3:"三",4:"四",5:"五",6:"六",7:"七",8:"八",9:"九",10:"十"}
+                                if floor_num in cn_nums:
+                                    aliases.extend([
+                                        f"{building}{cn_nums[floor_num]}层",
+                                        f"{building_letter}-{floor_num}F",
+                                        f"{building_letter}-{floor_num:02d}"
+                                    ])
+                        
+                        return list(dict.fromkeys([a for a in aliases if a]))
+                    except Exception:
+                        return []
+
+                floor_aliases = _extract_floor_aliases(current_query)
+
+                def _filter_chunks_by_aliases(ids, contents):
+                    kept_ids = []
+                    kept_texts = {}
+                    total = 0
+                    
+                    # 提取查询中的关键词
+                    query_keywords = []
+                    if current_query:
+                        # 提取建筑关键词
+                        import re
+                        building_match = re.search(r'([A-Za-z])栋', current_query)
+                        if building_match:
+                            query_keywords.append(building_match.group(1) + "栋")
+                            query_keywords.append(building_match.group(1))  # A栋 -> A
+                        
+                        # 提取楼层关键词
+                        floor_match = re.search(r'(\d+)(?:层|F|楼)', current_query)
+                        if floor_match:
+                            floor_num = floor_match.group(1)
+                            query_keywords.extend([f"{floor_num}层", f"{floor_num}F", f"{floor_num}楼"])
+                        
+                        # 提取地下层关键词
+                        basement_match = re.search(r'B(\d+)(?:层|F|楼|地下)', current_query)
+                        if basement_match:
+                            b_num = basement_match.group(1)
+                            query_keywords.extend([f"B{b_num}层", f"B{b_num}F", f"地下{b_num}层", "地下"])
+                        
+                        # 提取设备关键词 - 智能动态生成
+                        if "设备" in current_query or "设备清单" in current_query:
+                            # 基础设备关键词
+                            base_keywords = ["设备", "冷机", "水泵", "配电柜", "控制柜", "空调箱", "变风量末端"]
+                            query_keywords.extend(base_keywords)
+                            
+                            # 从图谱中动态提取设备类型关键词
+                            if hasattr(retriever, '_extract_device_keywords_from_graph'):
+                                device_keywords = retriever._extract_device_keywords_from_graph()
+                                query_keywords.extend(device_keywords)
+                    
+                    if isinstance(contents, dict):
+                        for cid, ctext in contents.items():
+                            total += 1
+                            text = ctext or ""
+                            
+                            # 关键词召回策略：只要包含查询中的任何关键词就召回
+                            if not query_keywords:
+                                kept_ids.append(cid)
+                                kept_texts[cid] = text
+                            else:
+                                # 检查是否包含任何查询关键词
+                                matches_keywords = any(keyword in text for keyword in query_keywords)
+                                
+                                # 特殊处理：如果是设备查询，还要检查设备相关词汇
+                                if "设备" in query_keywords:
+                                    device_indicators = ["设备", "冷机", "水泵", "配电", "控制", "空调", "变风量", "末端", "配电箱"]
+                                    matches_device = any(indicator in text for indicator in device_indicators)
+                                    if matches_device:
+                                        matches_keywords = True
+                                
+                                if matches_keywords:
+                                    kept_ids.append(cid)
+                                    kept_texts[cid] = text
+                    else:
+                        for i_c, cid in enumerate(ids):
+                            total += 1
+                            text = contents[i_c] if i_c < len(contents) else ""
+                            
+                            # 关键词召回策略：只要包含查询中的任何关键词就召回
+                            if not query_keywords:
+                                kept_ids.append(cid)
+                                kept_texts[cid] = text
+                            else:
+                                # 检查是否包含任何查询关键词
+                                matches_keywords = any(keyword in text for keyword in query_keywords)
+                                
+                                # 特殊处理：如果是设备查询，还要检查设备相关词汇
+                                if "设备" in query_keywords:
+                                    device_indicators = ["设备", "冷机", "水泵", "配电", "控制", "空调", "变风量", "末端", "配电箱"]
+                                    matches_device = any(indicator in text for indicator in device_indicators)
+                                    if matches_device:
+                                        matches_keywords = True
+                                
+                                if matches_keywords:
+                                    kept_ids.append(cid)
+                                    kept_texts[cid] = text
+                    
+                    logger.info(f"[BackendGuard] 关键词召回: kept={len(kept_ids)}/{total}, keywords={query_keywords}")
+                    return kept_ids, kept_texts
+
+                filtered_ids, filtered_texts = _filter_chunks_by_aliases(new_chunk_ids, new_chunk_contents)
+
+                # 合并通过过滤的 chunk
+                for cid, ctext in filtered_texts.items():
+                    all_chunk_contents[cid] = ctext
+                    logger.info(f"迭代检索Step{step} - 添加chunk(已过滤): {cid} - {ctext[:100]}...")
+
                 all_triples.update(new_triples)
-                all_chunk_ids.update(new_chunk_ids)
+                all_chunk_ids.update(filtered_ids)
                 logger.info(f"迭代检索Step{step}后 - 总chunk数量: {len(all_chunk_contents)}")
             except Exception as e:
                 logger.error(f"Iterative retrieval failed: {e}")
@@ -829,6 +977,40 @@ Your reasoning:
 
         await send_progress_update(client_id, "retrieval", 100, "答案生成完成!")
 
+        # 类型转换和验证 - 确保符合QuestionResponse模型要求
+        try:
+            # 确保final_answer是字符串
+            final_answer = str(final_answer) if final_answer is not None else ""
+            
+            # 确保final_triples是字符串列表
+            final_triples = [str(t) for t in final_triples if t is not None]
+            
+            # 确保final_chunk_contents是字符串列表
+            final_chunk_contents = [str(c) if c is not None else "" for c in final_chunk_contents]
+            
+            # 确保sub_questions是字典列表
+            if not isinstance(sub_questions, list):
+                sub_questions = []
+            sub_questions = [dict(sq) if isinstance(sq, dict) else {"sub-question": str(sq)} for sq in sub_questions]
+            
+            # 确保reasoning_steps是字典列表
+            if not isinstance(reasoning_steps, list):
+                reasoning_steps = []
+            reasoning_steps = [dict(step) if isinstance(step, dict) else {"type": "unknown", "content": str(step)} for step in reasoning_steps]
+            
+            # 调试日志 - 打印关键字段的类型和内容
+            logger.info(f"Response data types - answer: {type(final_answer)}, triples: {[type(t) for t in final_triples[:3]]}, chunks: {[type(c) for c in final_chunk_contents[:3]]}")
+            logger.info(f"Response data lengths - triples: {len(final_triples)}, chunks: {len(final_chunk_contents)}, sub_questions: {len(sub_questions)}")
+            
+        except Exception as type_error:
+            logger.error(f"Type conversion failed: {type_error}")
+            # 如果类型转换失败，使用安全的默认值
+            final_answer = str(final_answer) if final_answer is not None else "回答生成失败"
+            final_triples = []
+            final_chunk_contents = []
+            sub_questions = [{"sub-question": question}]
+            reasoning_steps = [{"type": "error", "content": f"类型转换错误: {type_error}"}]
+
         visualization_data = {
             "subqueries": prepare_subquery_visualization(sub_questions, reasoning_steps),
             "knowledge_graph": prepare_retrieved_graph_visualization(final_triples),
@@ -837,7 +1019,7 @@ Your reasoning:
                 "total_triples": len(final_triples),
                 "total_chunks": len(final_chunk_contents),
                 "sub_questions_count": len(sub_questions),
-                "triples_by_subquery": [s.get("triples_count", 0) for s in reasoning_steps if s.get("type") == "sub_question"]
+                "triples_by_subquery": [s.get("cumulative_triples_count", s.get("triples_count", 0)) for s in reasoning_steps if s.get("type") == "sub_question"]
             }
         }
 
@@ -850,6 +1032,10 @@ Your reasoning:
             visualization_data=visualization_data
         )
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        logger.error(f"ask_question failed: {str(e)}")
+        logger.error(f"Full traceback:\n{error_details}")
         await send_progress_update(client_id, "retrieval", 0, f"问答处理失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -884,32 +1070,30 @@ def prepare_retrieved_graph_visualization(triples: List[str]) -> Dict:
     links = []
     node_set = set()
 
-    for triple in triples[:10]:
+    for triple in triples[:20]:  # 增加显示数量
         try:
+            # 处理列表格式: [source, relation, target]
             if triple.startswith('[') and triple.endswith(']'):
                 try:
                     parts = ast.literal_eval(triple)
+                    if len(parts) == 3:
+                        source, relation, target = parts
+                        _add_triple_to_graph(source, relation, target, nodes, links, node_set)
                 except Exception:
                     continue
-                if len(parts) == 3:
-                    source, relation, target = parts
-
-                    for entity in [source, target]:
-                        if entity not in node_set:
-                            node_set.add(entity)
-                            nodes.append({
-                                "id": str(entity),
-                                "name": str(entity)[:20],
-                                "category": "entity",
-                                "symbolSize": 20
-                            })
-
-                    links.append({
-                        "source": str(source),
-                        "target": str(target),
-                        "name": str(relation)
-                    })
-        except:
+            # 处理字符串格式: (source [props], relation, target [props]) [score: x.xxx]
+            elif triple.startswith('(') and ')' in triple:
+                # 使用正则表达式解析字符串格式的三元组
+                import re
+                # 匹配格式: (source [props], relation, target [props]) [score: x.xxx]
+                pattern = r'\(([^,]+),\s*([^,]+),\s*([^)]+)\)(?:\s*\[score:\s*[\d.]+\])?'
+                match = re.match(pattern, triple)
+                if match:
+                    source = match.group(1).strip()
+                    relation = match.group(2).strip()
+                    target = match.group(3).strip()
+                    _add_triple_to_graph(source, relation, target, nodes, links, node_set)
+        except Exception as e:
             continue
 
     return {
@@ -917,6 +1101,28 @@ def prepare_retrieved_graph_visualization(triples: List[str]) -> Dict:
         "links": links,
         "categories": [{"name": "entity", "itemStyle": {"color": "#95de64"}}]
     }
+
+def _add_triple_to_graph(source: str, relation: str, target: str, nodes: list, links: list, node_set: set):
+    """Helper function to add a triple to the graph visualization"""
+    # 清理节点名称，移除属性信息
+    source_clean = source.split(' [')[0].strip()
+    target_clean = target.split(' [')[0].strip()
+    
+    for entity, clean_entity in [(source, source_clean), (target, target_clean)]:
+        if entity not in node_set:
+            node_set.add(entity)
+            nodes.append({
+                "id": entity,
+                "name": clean_entity[:30],  # 增加显示长度
+                "category": "entity",
+                "symbolSize": 20
+            })
+
+    links.append({
+        "source": source,
+        "target": target,
+        "name": relation
+    })
 
 def prepare_reasoning_flow_visualization(reasoning_steps: List[Dict]) -> Dict:
     """Prepare reasoning flow visualization"""
@@ -926,8 +1132,8 @@ def prepare_reasoning_flow_visualization(reasoning_steps: List[Dict]) -> Dict:
             "step": i + 1,
             "type": step.get("type", "unknown"),
             "question": step.get("question", "")[:50],
-            "triples_count": step.get("triples_count", 0),
-            "chunks_count": step.get("chunks_count", 0),
+            "triples_count": step.get("cumulative_triples_count", step.get("triples_count", 0)),
+            "chunks_count": step.get("cumulative_chunks_count", step.get("chunks_count", 0)),
             "processing_time": step.get("processing_time", 0)
         })
 

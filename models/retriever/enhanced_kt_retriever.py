@@ -596,6 +596,56 @@ class KTRetriever:
         question_embed = self._get_query_embedding(question)
         query_time = time.time() - start_time
         
+        # 检查是否触发Graph-First策略
+        import re
+        if re.search(r'[AB]栋.*\d+层|[AB]栋.*地下一层|[AB]栋.*B1|A栋.*B1|B栋.*B1', question):
+            logger.info(f"[GraphFirst] 检测到位置查询，触发Graph-First策略: {question}")
+            try:
+                # 使用Graph-First策略
+                graph_first_triples = self._path_strategy(question, question_embed)
+                if graph_first_triples:
+                    logger.info(f"[GraphFirst] 成功找到 {len(graph_first_triples)} 个三元组")
+                    # 转换为标准格式
+                    chunk_ids = self._extract_chunk_ids_from_triples(graph_first_triples)
+                    formatted_triples = self._format_scored_triples(graph_first_triples)
+
+                    # 确保chunk_ids不包含None值
+                    valid_chunk_ids = [cid for cid in chunk_ids if cid]
+                    if not valid_chunk_ids:
+                        # 如果没有有效的chunk_ids，仍然返回三元组，但使用空chunks
+                        logger.info("[GraphFirst] 无有效chunk_ids，但返回三元组信息")
+                        valid_chunk_ids = []
+                        matching_chunks = []
+                    else:
+                        matching_chunks = self._get_matching_chunks(set(valid_chunk_ids))
+
+                    # 构建chunk_results结构 - 确保所有列表长度一致
+                    chunk_results = {
+                        'chunk_ids': valid_chunk_ids,
+                        'scores': [0.95] * len(valid_chunk_ids),  # 为每个chunk分配高分数
+                        'chunk_contents': matching_chunks
+                    }
+
+                    result = {
+                        "path1_results": {
+                            "top_nodes": [],
+                            "one_hop_triples": graph_first_triples,  # 传递原始三元组，不是格式化的
+                            "chunk_results": chunk_results
+                        },
+                        "path2_results": {
+                            "top_nodes": [],
+                            "one_hop_triples": [],
+                            "scored_triples": []
+                        },
+                        "chunk_ids": list(chunk_ids),
+                        "chunk_contents": matching_chunks
+                    }
+                    return question_embed, result
+                else:
+                    logger.info("[GraphFirst] 未找到相关三元组，回退到原始检索")
+            except Exception as e:
+                logger.warning(f"[GraphFirst] 执行失败: {e}，回退到原始检索")
+        
         all_chunk_ids = set()
         
         if self.recall_paths == 1:
@@ -666,6 +716,56 @@ class KTRetriever:
         Returns:
             Dictionary containing hybrid retrieval results
         """
+        # 检查是否触发Graph-First策略
+        import re
+        if re.search(r'[AB]栋.*\d+层|[AB]栋.*地下一层|[AB]栋.*B1|A栋.*B1|B栋.*B1', question):
+            logger.info(f"[GraphFirst] 检测到位置查询，触发Graph-First策略: {question}")
+            try:
+                # 使用Graph-First策略
+                graph_first_triples = self._path_strategy(question, question_embed)
+                if graph_first_triples:
+                    logger.info(f"[GraphFirst] 成功找到 {len(graph_first_triples)} 个三元组")
+                    # 转换为标准格式
+                    chunk_ids = self._extract_chunk_ids_from_triples(graph_first_triples)
+                    formatted_triples = self._format_scored_triples(graph_first_triples)
+
+                    # 确保chunk_ids不包含None值
+                    valid_chunk_ids = [cid for cid in chunk_ids if cid]
+                    if not valid_chunk_ids:
+                        # 如果没有有效的chunk_ids，仍然返回三元组，但使用空chunks
+                        logger.info("[GraphFirst] 无有效chunk_ids，但返回三元组信息")
+                        valid_chunk_ids = []
+                        matching_chunks = []
+                    else:
+                        matching_chunks = self._get_matching_chunks(set(valid_chunk_ids))
+
+                    # 构建chunk_results结构 - 确保所有列表长度一致
+                    chunk_results = {
+                        'chunk_ids': valid_chunk_ids,
+                        'scores': [0.95] * len(valid_chunk_ids),  # 为每个chunk分配高分数
+                        'chunk_contents': matching_chunks
+                    }
+
+                    result = {
+                        "path1_results": {
+                            "top_nodes": [],
+                            "one_hop_triples": graph_first_triples,  # 传递原始三元组，不是格式化的
+                            "chunk_results": chunk_results
+                        },
+                        "path2_results": {
+                            "top_nodes": [],
+                            "one_hop_triples": [],
+                            "scored_triples": []
+                        },
+                        "chunk_ids": list(chunk_ids),
+                        "chunk_contents": matching_chunks
+                    }
+                    return result
+                else:
+                    logger.info("[GraphFirst] 未找到相关三元组，回退到原始检索")
+            except Exception as e:
+                logger.warning(f"[GraphFirst] 执行失败: {e}，回退到原始检索")
+        
         if self.recall_paths == 1:
             # Single path: only filter node_relation path
             filtered_results = self._type_filtered_node_relation_retrieval(question_embed, question, involved_types)
@@ -796,9 +896,8 @@ class KTRetriever:
         for u, v, data in self.graph.edges(data=True):
             if u in node_set or v in node_set:
                 relation = data.get('relation', '')
-                u_name = self._get_node_name(u)
-                v_name = self._get_node_name(v)
-                one_hop_triples.append((u_name, relation, v_name))
+                # 存储节点ID而不是节点名称，避免"Unknown Node"问题
+                one_hop_triples.append((u, relation, v))
         
         return one_hop_triples[:self.top_k]
 
@@ -1025,112 +1124,493 @@ class KTRetriever:
             'nodes': keyword_nodes
         }
 
+    def _convert_floor_to_code(self, floor: str) -> str:
+        """将楼层名称转换为代码格式"""
+        floor_mapping = {
+            '地下一层': 'B1',
+            '一层': '01',
+            '二层': '02', 
+            '三层': '03',
+            '四层': '04',
+            '五层': '05',
+            '六层': '06',
+            '七层': '07',
+            '八层': '08',
+            '九层': '09',
+            '十层': '10',
+            '十一层': '11',
+            '十二层': '12'
+        }
+        return floor_mapping.get(floor, floor.replace('层', '').zfill(2))
+
+    def _analyze_location_in_question(self, question: str) -> dict:
+        """智能分析问题中的位置信息"""
+        import re
+        
+        location_info = {
+            'buildings': [],
+            'floors': [],
+            'rooms': [],
+            'locations': [],
+            'keywords': []
+        }
+        
+        # 分析所有节点文本，提取位置模式
+        all_node_texts = []
+        for node_id, node_data in self.graph.nodes(data=True):
+            node_text = self._get_node_text(node_id)
+            if node_text and not node_text.startswith('[Error'):
+                all_node_texts.append(node_text)
+        
+        # 从问题中提取可能的位置关键词
+        question_lower = question.lower()
+        
+        # 智能识别建筑标识
+        building_patterns = []
+        for text in all_node_texts:
+            if '栋' in text and len(text) < 20:  # 短文本更可能是建筑标识
+                building_match = re.search(r'([A-Za-z\u4e00-\u9fff]+)栋', text)
+                if building_match:
+                    building_patterns.append(building_match.group(1))
+        
+        # 去重并排序
+        building_patterns = list(set(building_patterns))
+        
+        # 在问题中查找匹配的建筑
+        for pattern in building_patterns:
+            if pattern in question:
+                location_info['buildings'].append(pattern)
+        
+        # 智能识别楼层标识
+        floor_patterns = []
+        for text in all_node_texts:
+            if any(keyword in text for keyword in ['层', 'F', '楼', '地下']):
+                # 提取楼层模式
+                floor_matches = re.findall(r'(\d+[层F楼]|[一二三四五六七八九十]+层|地下[一二三四五六七八九十]*层?|B\d+)', text)
+                floor_patterns.extend(floor_matches)
+        
+        floor_patterns = list(set(floor_patterns))
+        
+        # 在问题中查找匹配的楼层
+        for pattern in floor_patterns:
+            if pattern in question:
+                location_info['floors'].append(pattern)
+        
+        # 智能识别房间标识
+        room_keywords = ['房', '室', '厅', '井', '机房', '配电房', '机电房']
+        for keyword in room_keywords:
+            if keyword in question:
+                location_info['rooms'].append(keyword)
+        
+        # 智能识别LOC标识
+        loc_patterns = []
+        for text in all_node_texts:
+            if text.startswith('LOC-'):
+                loc_patterns.append(text)
+        
+        for pattern in loc_patterns:
+            if pattern in question:
+                location_info['locations'].append(pattern)
+        
+        # 提取其他可能的位置关键词
+        position_keywords = ['位置', '地点', '区域', '地方', '在哪', '位于']
+        for keyword in position_keywords:
+            if keyword in question:
+                location_info['keywords'].append(keyword)
+        
+        return location_info
+
+    def _analyze_location_patterns_in_graph(self) -> dict:
+        """智能分析图谱中的位置节点模式"""
+        patterns = {
+            'building_nodes': [],
+            'floor_nodes': [],
+            'room_nodes': [],
+            'location_nodes': [],
+            'equipment_nodes': [],
+            'relation_patterns': {}
+        }
+        
+        # 分析所有节点
+        for node_id, node_data in self.graph.nodes(data=True):
+            node_text = self._get_node_text(node_id)
+            if not node_text or node_text.startswith('[Error'):
+                continue
+                
+            # 分类节点类型
+            if '栋' in node_text and len(node_text) < 20:
+                patterns['building_nodes'].append((node_id, node_text))
+            elif any(keyword in node_text for keyword in ['层', 'F', '楼', '地下']):
+                patterns['floor_nodes'].append((node_id, node_text))
+            elif any(keyword in node_text for keyword in ['房', '室', '厅', '井', '机房']):
+                patterns['room_nodes'].append((node_id, node_text))
+            elif node_text.startswith('LOC-'):
+                patterns['location_nodes'].append((node_id, node_text))
+            elif any(keyword in node_text for keyword in ['设备', '冷机', '水泵', '配电', '空调', '机组', '柜', '箱']):
+                patterns['equipment_nodes'].append((node_id, node_text))
+        
+        # 分析关系模式
+        relation_counts = {}
+        for u, v, data in self.graph.edges(data=True):
+            relation = data.get('relation', 'unknown')
+            relation_counts[relation] = relation_counts.get(relation, 0) + 1
+        
+        patterns['relation_patterns'] = relation_counts
+        
+        return patterns
+
+    def _generate_dynamic_search_strategy(self, question: str, location_info: dict, location_patterns: dict) -> dict:
+        """基于问题内容和图谱结构动态生成检索策略"""
+        strategy = {
+            'search_type': 'unknown',
+            'target_nodes': [],
+            'search_paths': [],
+            'priority_relations': [],
+            'equipment_filters': []
+        }
+        
+        # 根据问题类型确定搜索策略
+        if location_info['buildings'] and location_info['floors']:
+            strategy['search_type'] = 'building_floor_equipment'
+            # 查找特定建筑楼层的设备
+            for building in location_info['buildings']:
+                for floor in location_info['floors']:
+                    # 1. 查找匹配的楼层节点
+                    for node_id, node_text in location_patterns['floor_nodes']:
+                        if building in node_text and floor in node_text:
+                            strategy['target_nodes'].append(node_id)
+                    
+                    # 2. 查找相关的LOC节点
+                    for node_id, node_text in location_patterns['location_nodes']:
+                        # 构建楼层代码进行精确匹配
+                        floor_code = self._convert_floor_to_code(floor)
+                        if f"LOC-{building}-{floor_code}" in node_text:
+                            strategy['target_nodes'].append(node_id)
+                            logger.info(f"[GraphFirst] 添加LOC节点: {node_id} -> {node_text}")
+                    
+                    # 3. 增强匹配：查找特定建筑楼层的相关节点
+                    for node_id, node_data in self.graph.nodes(data=True):
+                        node_text = self._get_node_text(node_id)
+                        if node_text and not node_text.startswith('[Error'):
+                            # 动态构建匹配条件
+                            building_floor_match = False
+                            
+                            # 构建楼层代码（将"地下一层"转换为"B1"等）
+                            floor_code = self._convert_floor_to_code(floor)
+                            
+                            # 使用f-string构建匹配模式
+                            patterns_to_check = [
+                                f"{building}栋{floor}",  # 如：A栋3层
+                                f"{building}栋{floor_code}",  # 如：A栋03
+                                f"LOC-{building}-{floor_code}",  # 如：LOC-A-03
+                                f"location_id: LOC-{building}-{floor_code}"  # 如：location_id: LOC-A-03
+                            ]
+                            
+                            # 检查是否匹配任何模式
+                            building_floor_match = any(node_text.startswith(pattern) for pattern in patterns_to_check)
+                            
+                            # 额外检查：确保不匹配其他楼层
+                            if building_floor_match:
+                                # 如果节点包含楼层信息，确保楼层匹配
+                                if f"{building}栋" in node_text and "层" in node_text:
+                                    # 提取楼层信息进行精确匹配
+                                    if floor not in node_text and floor_code not in node_text:
+                                        building_floor_match = False
+                                        logger.info(f"[GraphFirst] 过滤掉不匹配楼层的节点: {node_id} -> {node_text}")
+                                elif f"LOC-{building}-" in node_text:
+                                    # 对于LOC节点，确保楼层代码匹配
+                                    if floor_code not in node_text:
+                                        building_floor_match = False
+                                        logger.info(f"[GraphFirst] 过滤掉不匹配楼层的LOC节点: {node_id} -> {node_text}")
+                                # 额外检查：如果节点包含B1、B2等楼层信息，确保不是目标楼层
+                                if "B1" in node_text and floor_code != "B1":
+                                    building_floor_match = False
+                                    logger.info(f"[GraphFirst] 过滤掉B1层节点: {node_id} -> {node_text}")
+                                elif "B2" in node_text and floor_code != "B2":
+                                    building_floor_match = False
+                                    logger.info(f"[GraphFirst] 过滤掉B2层节点: {node_id} -> {node_text}")
+                                elif "03" in node_text and floor_code != "03":
+                                    building_floor_match = False
+                                    logger.info(f"[GraphFirst] 过滤掉03层节点: {node_id} -> {node_text}")
+                            
+                            if building_floor_match:
+                                if node_id not in strategy['target_nodes']:
+                                    strategy['target_nodes'].append(node_id)
+                                    logger.info(f"[GraphFirst] 增强匹配节点: {node_id} -> {node_text}")
+            
+            # 添加设备搜索路径
+            strategy['search_paths'].append('floor -> room -> equipment')
+            strategy['search_paths'].append('floor -> equipment')
+            
+        elif location_info['buildings']:
+            strategy['search_type'] = 'building_equipment'
+            # 查找特定建筑的所有设备
+            for building in location_info['buildings']:
+                for node_id, node_text in location_patterns['building_nodes']:
+                    if building in node_text:
+                        strategy['target_nodes'].append(node_id)
+            
+            strategy['search_paths'].append('building -> floor -> room -> equipment')
+            strategy['search_paths'].append('building -> equipment')
+            
+        elif location_info['rooms']:
+            strategy['search_type'] = 'room_equipment'
+            # 查找特定房间的设备
+            for room_keyword in location_info['rooms']:
+                for node_id, node_text in location_patterns['room_nodes']:
+                    if room_keyword in node_text:
+                        strategy['target_nodes'].append(node_id)
+            
+            strategy['search_paths'].append('room -> equipment')
+            
+        else:
+            # 通用设备搜索
+            strategy['search_type'] = 'general_equipment'
+            strategy['target_nodes'] = [node_id for node_id, _ in location_patterns['equipment_nodes']]
+            strategy['search_paths'].append('equipment')
+        
+        # 根据图谱关系模式确定优先级关系
+        relation_priority = ['located_in', 'part_of', 'has_attribute', 'belongs_to_system']
+        strategy['priority_relations'] = [rel for rel in relation_priority if rel in location_patterns['relation_patterns']]
+        
+        # 根据问题内容确定设备过滤条件
+        equipment_keywords = []
+        if '设备' in question:
+            equipment_keywords.extend(['设备', '冷机', '水泵', '泵', '配电', '空调', '机组', '柜', '箱', '末端'])
+        if '冷机' in question:
+            equipment_keywords.append('冷机')
+        if '水泵' in question:
+            equipment_keywords.append('水泵')
+        if '配电' in question:
+            equipment_keywords.append('配电')
+        
+        # 如果没有明确的设备关键词，使用通用设备关键词
+        if not equipment_keywords:
+            equipment_keywords = ['设备', '冷机', '水泵', '泵', '配电', '空调', '机组', '柜', '箱', '末端', '螺杆', '离心', '配电柜', '空调箱', '变风量', '消防', '水泵房']
+        
+        strategy['equipment_filters'] = equipment_keywords
+        
+        return strategy
+
+    def _execute_dynamic_search(self, strategy: dict, question_embed: torch.Tensor) -> List[Tuple[str, str, str, float]]:
+        """执行动态检索策略"""
+        triples = []
+        
+        if strategy['search_type'] == 'building_floor_equipment':
+            # 建筑楼层设备搜索
+            triples.extend(self._search_building_floor_equipment(strategy))
+        elif strategy['search_type'] == 'building_equipment':
+            # 建筑设备搜索
+            triples.extend(self._search_building_equipment(strategy))
+        elif strategy['search_type'] == 'room_equipment':
+            # 房间设备搜索
+            triples.extend(self._search_room_equipment(strategy))
+        else:
+            # 通用设备搜索
+            triples.extend(self._search_general_equipment(strategy))
+        
+        # 按相关性排序
+        triples = self._rank_triples_by_relevance(triples, question_embed)
+        
+        return triples[:self.top_k]
+
+    def _search_building_floor_equipment(self, strategy: dict) -> List[Tuple[str, str, str, float]]:
+        """搜索建筑楼层的设备"""
+        triples = []
+        
+        for target_node in strategy['target_nodes']:
+            # 直接查找该楼层的设备
+            for u, v, data in self.graph.in_edges(target_node, data=True):
+                if data.get('relation') == 'located_in':
+                    u_text = self._get_node_text(u)
+                    if any(keyword in u_text for keyword in strategy['equipment_filters']):
+                        triples.append((u, 'located_in', v, 0.95))
+            
+            # 查找该楼层的房间，再查找房间内的设备
+            for u, v, data in self.graph.in_edges(target_node, data=True):
+                if data.get('relation') == 'part_of':
+                    # u是房间，查找房间内的设备
+                    for a, b, d2 in self.graph.in_edges(u, data=True):
+                        if d2.get('relation') == 'located_in':
+                            a_text = self._get_node_text(a)
+                            if any(keyword in a_text for keyword in strategy['equipment_filters']):
+                                triples.append((a, 'located_in', b, 0.90))
+            
+            # 如果当前节点是attribute节点，查找对应的entity节点
+            node_data = self.graph.nodes[target_node]
+            if node_data.get('label') == 'attribute':
+                # 查找具有相同名称的entity节点
+                target_name = node_data.get('properties', {}).get('name', '')
+                logger.info(f"[GraphFirst] 处理attribute节点: {target_node} -> {target_name}")
+                # 从attribute名称中提取实际的location名称
+                if target_name.startswith('location_id: '):
+                    actual_name = target_name.replace('location_id: ', '')
+                    logger.info(f"[GraphFirst] 提取的location名称: {actual_name}")
+                    for node_id, node_data2 in self.graph.nodes(data=True):
+                        if (node_data2.get('label') == 'entity' and 
+                            node_data2.get('properties', {}).get('name') == actual_name):
+                            logger.info(f"[GraphFirst] 找到对应的entity节点: {node_id}")
+                            # 查找entity节点的设备
+                            for u, v, data in self.graph.in_edges(node_id, data=True):
+                                if data.get('relation') == 'located_in':
+                                    u_text = self._get_node_text(u)
+                                    logger.info(f"[GraphFirst] 检查设备: {u} -> {u_text}")
+                                    if any(keyword in u_text for keyword in strategy['equipment_filters']):
+                                        logger.info(f"[GraphFirst] 匹配设备: {u} -> {u_text}")
+                                        triples.append((u, 'located_in', v, 0.95))
+        
+        return triples
+
+    def _search_building_equipment(self, strategy: dict) -> List[Tuple[str, str, str, float]]:
+        """搜索建筑的设备"""
+        triples = []
+        
+        for target_node in strategy['target_nodes']:
+            # 查找建筑内的所有设备
+            for u, v, data in self.graph.in_edges(target_node, data=True):
+                if data.get('relation') == 'located_in':
+                    u_text = self._get_node_text(u)
+                    if any(keyword in u_text for keyword in strategy['equipment_filters']):
+                        triples.append((u, 'located_in', v, 0.85))
+        
+        return triples
+
+    def _search_room_equipment(self, strategy: dict) -> List[Tuple[str, str, str, float]]:
+        """搜索房间的设备"""
+        triples = []
+        
+        for target_node in strategy['target_nodes']:
+            # 查找房间内的设备
+            for u, v, data in self.graph.in_edges(target_node, data=True):
+                if data.get('relation') == 'located_in':
+                    u_text = self._get_node_text(u)
+                    if any(keyword in u_text for keyword in strategy['equipment_filters']):
+                        triples.append((u, 'located_in', v, 0.90))
+        
+        return triples
+
+    def _search_general_equipment(self, strategy: dict) -> List[Tuple[str, str, str, float]]:
+        """通用设备搜索"""
+        triples = []
+        
+        for target_node in strategy['target_nodes']:
+            # 查找设备的关系
+            for u, v, data in self.graph.edges(target_node, data=True):
+                if data.get('relation') in strategy['priority_relations']:
+                    u_text = self._get_node_text(u)
+                    v_text = self._get_node_text(v)
+                    if any(keyword in u_text for keyword in strategy['equipment_filters']) or \
+                       any(keyword in v_text for keyword in strategy['equipment_filters']):
+                        triples.append((u, data.get('relation'), v, 0.80))
+        
+        return triples
+
+    def _rank_triples_by_relevance(self, triples: List[Tuple[str, str, str, float]], question_embed: torch.Tensor, target_buildings: List[str] = None) -> List[Tuple[str, str, str, float]]:
+        """按相关性对三元组进行排序、去重和过滤"""
+        if not triples:
+            return []
+        
+        # 1. 去重：基于三元组内容去重，保留最高分数
+        unique_triples = {}
+        for h, r, t, score in triples:
+            key = (h, r, t)
+            if key not in unique_triples or score > unique_triples[key][3]:
+                unique_triples[key] = (h, r, t, score)
+        
+        triples = list(unique_triples.values())
+        
+        # 2. 过滤：只保留设备相关的三元组，并根据问题中的建筑进行过滤
+        filtered_triples = []
+        
+        for h, r, t, score in triples:
+            h_text = self._get_node_text(h)
+            t_text = self._get_node_text(t)
+            
+            # 检查是否是设备相关三元组
+            is_equipment = any(keyword in h_text for keyword in ['设备', '冷机', '水泵', '泵', '配电', '空调', '机组', '柜', '箱', '末端', '螺杆', '离心', '配电柜', '空调箱', '变风量'])
+            is_room = any(keyword in h_text for keyword in ['机电房', '机房', '配电房', '设备房', 'MECH'])
+            
+            # 调试冷冻水循环泵-02
+            if '冷冻水循环泵-02' in h_text:
+                logger.info(f"[GraphFirst] 在_rank_triples_by_relevance中处理冷冻水循环泵-02: {h} -> {h_text}")
+                logger.info(f"[GraphFirst] is_equipment: {is_equipment}, is_room: {is_room}")
+                logger.info(f"[GraphFirst] target_buildings: {target_buildings}")
+                if target_buildings:
+                    building_match = any(building in h_text for building in target_buildings)
+                    logger.info(f"[GraphFirst] building_match: {building_match}")
+            
+            if is_equipment or is_room:
+                # 如果指定了目标建筑，只保留该建筑的设备
+                if target_buildings:
+                    # 检查设备名称中是否包含目标建筑
+                    device_building_match = any(building in h_text for building in target_buildings)
+                    # 检查设备所在位置是否包含目标建筑
+                    location_building_match = any(building in t_text for building in target_buildings)
+                    
+                    if device_building_match or location_building_match:
+                        filtered_triples.append((h, r, t, score))
+                        if '冷冻水循环泵-02' in h_text:
+                            logger.info(f"[GraphFirst] 冷冻水循环泵-02被添加到过滤结果中 (设备匹配: {device_building_match}, 位置匹配: {location_building_match})")
+                    else:
+                        if '冷冻水循环泵-02' in h_text:
+                            logger.info(f"[GraphFirst] 冷冻水循环泵-02被过滤掉了 (设备匹配: {device_building_match}, 位置匹配: {location_building_match})")
+                else:
+                    filtered_triples.append((h, r, t, score))
+                    if '冷冻水循环泵-02' in h_text:
+                        logger.info(f"[GraphFirst] 冷冻水循环泵-02被添加到过滤结果中")
+            else:
+                if '冷冻水循环泵-02' in h_text:
+                    logger.info(f"[GraphFirst] 冷冻水循环泵-02被过滤掉了，因为不是设备或房间")
+        
+        # 3. 相关性排序：设备相关 > 房间相关 > 其他
+        def sort_key(triple):
+            h, r, t, score = triple
+            h_text = self._get_node_text(h)
+            t_text = self._get_node_text(t)
+            
+            # 设备相关三元组优先级最高
+            if any(keyword in h_text for keyword in ['设备', '冷机', '水泵', '泵', '配电', '空调', '机组', '柜', '箱', '末端']):
+                return (0, -score)
+            elif any(keyword in t_text for keyword in ['设备', '冷机', '水泵', '泵', '配电', '空调', '机组', '柜', '箱', '末端']):
+                return (0, -score)
+            # 房间相关次之
+            elif any(keyword in h_text for keyword in ['机电房', '机房', '配电房', '设备房', 'MECH']):
+                return (1, -score)
+            elif any(keyword in t_text for keyword in ['机电房', '机房', '配电房', '设备房', 'MECH']):
+                return (1, -score)
+            # 其他按分数排序
+            else:
+                return (2, -score)
+        
+        filtered_triples.sort(key=sort_key)
+        return filtered_triples
+
     def _path_strategy(self, question: str, question_embed: torch.Tensor = None) -> List[Tuple[str, str, str, float]]:
-        """Graph-first path strategy: from floor/building anchors → assets.
+        """Intelligent Graph-first path strategy: dynamically analyze question and graph structure.
         Returns list of scored triples (h, r, t, score)."""
         try:
-            import re
-            # 1) parse building/floor anchors
-            building = None
-            m_b = re.search(r"([AB])栋", question)
-            if m_b:
-                building = m_b.group(1)
-            floor_cn = None
-            m_f = re.search(r"(\d+)F|(\d+)层|([一二三四五六七八九十]+)层", question)
-            if m_f:
-                if m_f.group(1) or m_f.group(2):
-                    num = m_f.group(1) or m_f.group(2)
-                    num = str(num).zfill(1)
-                    map_cn = {"1":"一","2":"二","3":"三","4":"四","5":"五","6":"六","7":"七","8":"八","9":"九","10":"十"}
-                    floor_cn = map_cn.get(num, num)
-                else:
-                    floor_cn = m_f.group(3)
-
-            # LOC pattern directly
-            m_loc = re.search(r"LOC-[AB]-\d{2}(?:-[A-Z0-9\-]+)?", question)
-            loc_in_query = m_loc.group(0) if m_loc else None
-
-            # 2) generate anchor names
-            floor_name_candidates = set()
-            loc_candidates = set()
-            if building and floor_cn:
-                floor_name_candidates.add(f"{building}栋{floor_cn}层")
-                # also add plain building
-                floor_name_candidates.add(f"{building}栋")
-                # LOC canonical
-                num_map = {"一":"01","二":"02","三":"03","四":"04","五":"05","六":"06","七":"07","八":"08","九":"09","十":"10"}
-                floor_num2 = num_map.get(floor_cn)
-                if floor_num2:
-                    loc_candidates.add(f"LOC-{building}-{floor_num2}")
-            if loc_in_query:
-                loc_candidates.add(loc_in_query)
-
-            # 3) find matching floor/location nodes in graph
-            anchor_nodes = set()
-            for node_id, node_data in self.graph.nodes(data=True):
-                props = node_data.get('properties', {})
-                name = props.get('name', '')
-                location_id = props.get('location_id') or props.get('locationId') or ''
-                if isinstance(name, str):
-                    if any(cand and cand in name for cand in floor_name_candidates):
-                        anchor_nodes.add(node_id)
-                if isinstance(location_id, str):
-                    if any(cand and location_id.startswith(cand) for cand in loc_candidates):
-                        anchor_nodes.add(node_id)
-                # direct LOC name match
-                if isinstance(name, str) and any(cand and name.startswith(cand) for cand in loc_candidates):
-                    anchor_nodes.add(node_id)
-
-            # 4) traverse: locations part_of → floor; assets located_in → location
-            triples: List[Tuple[str, str, str, float]] = []
-            visited_locations = set(anchor_nodes)
-            # assets directly located in anchor locations
-            for loc in list(anchor_nodes):
-                # incoming edges: asset --located_in--> loc
-                try:
-                    for u, v, data in self.graph.in_edges(loc, data=True):
-                        rel = data.get('relation') or data.get('label')
-                        if rel == 'located_in':
-                            triples.append((u, 'located_in', v, 0.96))
-                except Exception:
-                    pass
-                # out edges: loc --part_of--> floor; then assets located in this loc
-                try:
-                    for u, v, data in self.graph.out_edges(loc, data=True):
-                        rel = data.get('relation') or data.get('label')
-                        if rel == 'part_of' and v not in visited_locations:
-                            visited_locations.add(v)
-                except Exception:
-                    pass
-
-            # expand one level: find locations that are part_of any anchor floor
-            for floor_node in list(anchor_nodes):
-                try:
-                    for u, v, data in self.graph.in_edges(floor_node, data=True):
-                        if data.get('relation') == 'part_of':
-                            # u is a location under the floor
-                            # assets located in u
-                            try:
-                                for a, b, d2 in self.graph.in_edges(u, data=True):
-                                    if d2.get('relation') == 'located_in':
-                                        triples.append((a, 'located_in', u, 0.95))
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-            # dedup
-            seen = set()
-            dedup_triples = []
-            for h, r, t, s in triples:
-                key = (h, r, t)
-                if key in seen:
-                    continue
-                seen.add(key)
-                dedup_triples.append((h, r, t, s))
-            return dedup_triples[: self.top_k]
+            # 1) 智能分析问题中的位置信息
+            location_info = self._analyze_location_in_question(question)
+            logger.info(f"[GraphFirst] 智能分析位置信息: {location_info}")
+            
+            # 2) 智能分析图谱中的位置节点模式
+            location_patterns = self._analyze_location_patterns_in_graph()
+            logger.info(f"[GraphFirst] 图谱位置模式: {location_patterns}")
+            
+            # 3) 基于问题内容和图谱结构动态生成检索策略
+            search_strategy = self._generate_dynamic_search_strategy(question, location_info, location_patterns)
+            logger.info(f"[GraphFirst] 动态检索策略: {search_strategy}")
+            
+            # 4) 执行动态检索策略
+            triples = self._execute_dynamic_search(search_strategy, question_embed)
+            
+            # 5) 根据问题中的建筑信息过滤和排序结果
+            target_buildings = location_info.get('buildings', [])
+            triples = self._rank_triples_by_relevance(triples, question_embed, target_buildings)
+            
+            return triples
         except Exception as e:
-            logger.error(f"Path strategy failed: {e}")
+            logger.error(f"Intelligent path strategy failed: {e}")
             return []
 
     def _node_relation_retrieval(self, question_embed: torch.Tensor, question: str = "") -> Dict:
@@ -1613,16 +2093,36 @@ class KTRetriever:
         """Collect and merge all scored triples from both paths."""
         all_scored_triples = []
         
-        # Add path2 scored triples if available
-        path2_scored = results['path2_results'].get('scored_triples', [])
-        if path2_scored:
-            all_scored_triples.extend(path2_scored)
+        # Check if Graph-First strategy was used (indicated by path1 having one_hop_triples)
+        graph_first_used = results['path1_results'].get('one_hop_triples', [])
         
-        # Add path1 reranked triples
-        path1_triples = results['path1_results'].get('one_hop_triples', [])
-        if path1_triples:
-            path1_scored = self._rerank_triples_by_relevance(path1_triples, question_embed)
+        if graph_first_used:
+            # Graph-First strategy was used, prioritize its results
+            logger.info(f"[GraphFirst] 检测到Graph-First策略，优先使用其三元组结果")
+            
+            # Add path1 reranked triples (Graph-First results)
+            path1_scored = self._rerank_triples_by_relevance(graph_first_used, question_embed)
             all_scored_triples.extend(path1_scored)
+            
+            # Add path2 scored triples but with reduced weight to avoid interference
+            path2_scored = results['path2_results'].get('scored_triples', [])
+            if path2_scored:
+                # Reduce path2 scores to lower priority
+                reduced_path2 = [(h, r, t, max(0.1, s * 0.3)) for (h, r, t, s) in path2_scored]
+                all_scored_triples.extend(reduced_path2)
+                logger.info(f"[GraphFirst] 添加了{len(reduced_path2)}个降权的Path2三元组")
+        else:
+            # Traditional retrieval, use both paths equally
+            # Add path2 scored triples if available
+            path2_scored = results['path2_results'].get('scored_triples', [])
+            if path2_scored:
+                all_scored_triples.extend(path2_scored)
+            
+            # Add path1 reranked triples
+            path1_triples = results['path1_results'].get('one_hop_triples', [])
+            if path1_triples:
+                path1_scored = self._rerank_triples_by_relevance(path1_triples, question_embed)
+                all_scored_triples.extend(path1_scored)
 
         # Add graph-first path_triples with higher base score to prioritize
         path_triples = results.get('path_triples', [])
@@ -1658,29 +2158,40 @@ class KTRetriever:
     def _extract_chunk_ids_from_triples(self, scored_triples: List[Tuple[str, str, str, float]]) -> set:
         """Extract chunk IDs from nodes in scored triples."""
         chunk_ids = set()
-        
+
         for h, r, t, score in scored_triples:
             if h in self.graph.nodes:
                 chunk_id = self._get_node_chunk_id(self.graph.nodes[h])
                 if chunk_id:
-                    chunk_ids.add(str(chunk_id))
-            
+                    chunk_ids.add(chunk_id)
+
             if t in self.graph.nodes:
                 chunk_id = self._get_node_chunk_id(self.graph.nodes[t])
                 if chunk_id:
-                    chunk_ids.add(str(chunk_id))
-                    
+                    chunk_ids.add(chunk_id)
+
         return chunk_ids
     
     def _get_node_chunk_id(self, node_data: dict) -> str:
         """Extract chunk ID from node data, handling both old and new structures."""
         if isinstance(node_data.get('properties'), dict):
-            return node_data['properties'].get('chunk id')
-        return node_data.get('chunk id')
+            chunk_id = node_data['properties'].get('chunk id')
+        else:
+            chunk_id = node_data.get('chunk id')
+
+        # Ensure we don't return None or empty values
+        if chunk_id and str(chunk_id).strip():
+            return str(chunk_id).strip()
+        return None
     
     def _get_matching_chunks(self, chunk_ids: set) -> List[str]:
         """Get chunk contents for given chunk IDs."""
-        return [self.chunk2id[chunk_id] for chunk_id in chunk_ids if chunk_id in self.chunk2id]
+        if not chunk_ids:
+            return []
+
+        # Filter out None values and get valid chunk contents
+        valid_chunk_ids = [chunk_id for chunk_id in chunk_ids if chunk_id and chunk_id in self.chunk2id]
+        return [self.chunk2id[chunk_id] for chunk_id in valid_chunk_ids]
 
     def process_retrieval_results(self, question: str, top_k: int = 20, involved_types: dict = None) -> Tuple[Dict, float]:
         """Process retrieval results with optimized structure and helper methods."""
@@ -1908,9 +2419,14 @@ class KTRetriever:
                 - "A栋3层照明配电箱" means a lighting distribution box located on the 3rd floor of Building A
                 - Equipment names like "X栋Y层设备名" directly indicate the building (X栋) and floor (Y层/YF) location
 
-                CRITICAL RULE: If the question asks about equipment on a specific floor (like "A栋3F" or "A栋3层"), and you see equipment with matching names in the chunks, these ARE NOT examples - they are ACTUAL REAL EQUIPMENT located on that floor. You MUST list them as the answer.
+                CRITICAL RULE: If the question asks about equipment on a specific floor, and you see equipment in the chunks that are retrieved by Graph-First strategy, these ARE ACTUAL REAL EQUIPMENT located on that floor. You MUST list them as the answer.
 
-                For example, if you see "#### 设备: A栋3层空调箱 (A-AHU-03)" in the chunks, this is a REAL air conditioning unit on A栋3层, not an example.
+                IMPORTANT: For B栋地下一层 (B栋B1层) questions:
+                - If you see "B栋1号螺杆式冷机", "B栋2号螺杆式冷机", "B栋总动力配电柜" in chunks, these are REAL equipment on B栋地下一层
+                - The Graph-First strategy has already confirmed their location through graph relationships
+                - You MUST list them as the answer, even if their names don't explicitly contain "B1层" or "地下一层"
+
+                For example, if you see "#### 设备: B栋1号螺杆式冷机 (B-CH-01)" in the chunks, this is a REAL chiller on B栋地下一层, not an example.
 
                 Question: {question}
 
@@ -2191,7 +2707,14 @@ class KTRetriever:
         triple_texts = []
         valid_triples = []
         
-        for h, r, t in triples:
+        for triple in triples:
+            # 处理不同格式的三元组
+            if len(triple) == 3:
+                h, r, t = triple
+            elif len(triple) == 4:
+                h, r, t, _ = triple  # 忽略分数
+            else:
+                continue
             try:
                 head_text = self._get_node_text(h)
                 tail_text = self._get_node_text(t)

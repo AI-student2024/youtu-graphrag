@@ -62,6 +62,27 @@ class AgentConfig:
     enable_parallel_subquestions: bool = True
 
 @dataclass
+class GraphFirstConfig:
+    """Graph-First strategy configuration"""
+    building_pattern: str = r"([AB])栋"
+    floor_pattern: str = r"(\d+)F|(\d+)层|([一二三四五六七八九十]+)层|地下一层|B1"
+    loc_pattern: str = r"LOC-[AB]-\d{2}(?:-[A-Z0-9\-]+)?"
+    number_map: dict = None
+    device_keywords: list = None
+    room_keywords: list = None
+    
+    def __post_init__(self):
+        if self.number_map is None:
+            self.number_map = {
+                "1": "一", "2": "二", "3": "三", "4": "四", "5": "五",
+                "6": "六", "7": "七", "8": "八", "9": "九", "10": "十"
+            }
+        if self.device_keywords is None:
+            self.device_keywords = ["设备", "冷机", "水泵", "配电", "空调", "机组", "柜", "箱", "末端"]
+        if self.room_keywords is None:
+            self.room_keywords = ["机电房", "机房", "配电房", "设备房", "MECH"]
+
+@dataclass
 class RetrievalConfig:
     """Retrieval configuration"""
     top_k: int = 5
@@ -75,12 +96,15 @@ class RetrievalConfig:
     cache_dir: str = "retriever/faiss_cache_new"
     faiss: FAISSConfig = None
     agent: AgentConfig = None
+    graph_first: GraphFirstConfig = None
     
     def __post_init__(self):
         if self.faiss is None:
             self.faiss = FAISSConfig()
         if self.agent is None:
             self.agent = AgentConfig()
+        if self.graph_first is None:
+            self.graph_first = GraphFirstConfig()
 
 @dataclass
 class EmbeddingsConfig:
@@ -196,9 +220,11 @@ class ConfigManager:
         retrieval_data = self.config_data.get("retrieval", {})
         faiss_data = retrieval_data.pop("faiss", {})
         agent_data = retrieval_data.pop("agent", {})
+        graph_first_data = retrieval_data.pop("graph_first", {})
         self.retrieval = RetrievalConfig(**retrieval_data)
         self.retrieval.faiss = FAISSConfig(**faiss_data)
         self.retrieval.agent = AgentConfig(**agent_data)
+        self.retrieval.graph_first = GraphFirstConfig(**graph_first_data)
         
         embeddings_data = self.config_data.get("embeddings", {})
         self.embeddings = EmbeddingsConfig(**embeddings_data)
